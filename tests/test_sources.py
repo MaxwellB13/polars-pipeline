@@ -123,3 +123,18 @@ def test_reader_protocol_enforced(data_dir: Path) -> None:
 
     with pytest.raises(SourceError, match="reader must implement"):
         Source("c", NotAReader())  # type: ignore[arg-type]
+
+
+def test_promote_header_dedupes_repeated_labels() -> None:
+    """Review finding #8."""
+    lf = pl.LazyFrame(
+        {
+            "column_1": ["report", "Q1", "1"],
+            "column_2": [None, "Total", "2"],
+            "column_3": ["x", "Q2", "3"],
+            "column_4": [None, "Total", "4"],
+        }
+    )
+    out = prep.promote_header()(lf).collect()
+    assert out.columns == ["Q1", "Total", "Q2", "Total_2"]
+    assert out.height == 1

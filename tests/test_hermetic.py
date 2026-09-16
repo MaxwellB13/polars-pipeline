@@ -145,3 +145,91 @@ def test_hermetic_then_real_share_nothing(data_dir: Path, staging_dir: Path) -> 
         "customers.parquet",
         "orders.parquet",
     ]
+
+
+def test_reference_data_is_read_for_real_in_hermetic_runs(
+    data_dir: Path, staging_dir: Path
+) -> None:
+    """A lookup CSV in the codebase is used as-is; generated orders reference its keys."""
+    customers_reader = MemReader(CUSTOMERS, "customers")
+
+    class P(BasePipeline):
+        sources = (
+            Source("customers", customers_reader, spec=CustomersSpec, hermetic="real"),
+            Source("orders", Missing(), spec=OrdersSpec, synthetic_rows=100),
+            Source("notes", MemReader(pl.DataFrame({"k": [1]}), "notes"), hermetic="real"),
+        )
+
+        @step()
+        def enriched(self, orders, customers, notes):
+            return orders.join(customers, on="customer_id", how="inner")
+
+    res = P(PipelineConfig(staging_dir)).run(hermetic=True, seed=3)
+    assert customers_reader.scans == 1
+    assert res.ingested == ["customers", "notes", "orders"]
+    assert res.package.provenance["customers"] == "real"
+    assert res.package.provenance["orders"] == "synthetic"
+    assert (staging_dir / "hermetic" / "3" / "customers.parquet").exists()
+    assert not (staging_dir / "customers.parquet").exists()  # real area untouched
+
+    # FK parent was the real table: every synthetic order points at a real customer
+    orders = res.package.collect("orders")
+    assert set(orders["customer_id"]) <= set(CUSTOMERS["customer_id"])
+    assert res.package.collect("enriched").height == 100
+
+    # Rerun: the reference data is fingerprint-checked like any real source.
+    again = P(PipelineConfig(staging_dir)).run(hermetic=True, seed=3)
+    assert again.reused == ["customers", "notes", "orders"]
+    assert customers_reader.scans == 1
+
+
+def test_hermetic_value_validated() -> None:
+    with pytest.raises(SourceError, match="hermetic must be"):
+        Source("x", Missing(), hermetic="sometimes")  # type: ignore[arg-type]
+
+
+def test_shared_spec_regeneration_is_not_shadowed_by_sibling(staging_dir: Path) -> None:
+    """Review finding #5: a staged sibling sharing the spec must not be offered
+    as a polspec reference, or it silently replaces generation."""
+
+    class P(BasePipeline):
+        sources = (
+            Source("orders_a", Missing(), spec=OrdersSpec, synthetic_rows=20),
+            Source("orders_b", Missing(), spec=OrdersSpec, synthetic_rows=20),
+            Source("customers", Missing(), spec=CustomersSpec, synthetic_rows=5),
+        )
+
+        @step()
+        def both(self, orders_a, orders_b):
+            return orders_a.head(1)
+
+    cfg = PipelineConfig(staging_dir)
+    P(cfg).run(hermetic=True, seed=1)
+    res = P(cfg).run(hermetic=True, seed=1, refresh={"orders_b"}, synthetic_rows={"orders_b": 7})
+    assert res.ingested == ["orders_b"]
+    assert res.package.collect("orders_b").height == 7
+    assert res.package.collect("orders_a").height == 20
+
+
+def test_registry_errors_surface_as_hermetic_errors(staging_dir: Path) -> None:
+    """Review finding #6: two different specs with one class name."""
+    from polspec import ColSpec, FrameSpec
+
+    def make(dtype):
+        class Spec(FrameSpec):
+            x = ColSpec(dtype)
+
+        return Spec
+
+    class P(BasePipeline):
+        sources = (
+            Source("a", Missing(), spec=make(pl.Int64)),
+            Source("b", Missing(), spec=make(pl.String)),
+        )
+
+        @step()
+        def s(self, a, b):
+            return a
+
+    with pytest.raises(HermeticError, match="cannot build a spec registry.*both named 'Spec'"):
+        P(PipelineConfig(staging_dir)).run(hermetic=True, seed=1)

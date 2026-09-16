@@ -147,3 +147,42 @@ def test_bad_child_prefix_and_unresolved_child_input_rejected() -> None:
 
         class Q(BasePipeline):
             children = {"c": Child(CustomersPipeline, inputs={"customers": "nothing"})}
+
+
+def test_child_inputs_resolve_through_nested_prefixes(staging_dir: Path) -> None:
+    """Review finding #2: Child(inputs=) names are in the *declaring* pipeline's
+    namespace, so they must be prefixed when that pipeline is itself a child."""
+
+    class Mid(BasePipeline):
+        sources = (Source("customers", MemReader(CUSTOMERS.head(1), "mid"), spec=CustomersSpec),)
+        children = {"c": Child(CustomersPipeline, inputs={"customers": "customers"})}
+
+    class Top(BasePipeline):
+        # A same-named top-level source that the grandchild must NOT bind to.
+        sources = (Source("customers", MemReader(CUSTOMERS, "top"), spec=CustomersSpec),)
+        children = {"m": Mid}
+
+        @step(inputs=("m.c.named",))
+        def out(self, named):
+            return named
+
+    plan = Top(PipelineConfig()).plan
+    by_name = {b.name: b.spec for b in plan.steps}
+    assert by_name["m.c.upper"].inputs == ("m.customers",)
+    res = Top(PipelineConfig(staging_dir)).run()
+    assert res.package.collect("out").height == 1  # Mid's one-row table, not Top's
+
+
+def test_child_inputs_can_forward_a_frame_the_parent_is_fed(staging_dir: Path) -> None:
+    class Mid(BasePipeline):
+        requires = ("customers",)
+        children = {"c": Child(CustomersPipeline, inputs={"customers": "customers"})}
+
+    class Top(BasePipeline):
+        sources = (Source("customers", MemReader(CUSTOMERS, "top"), spec=CustomersSpec),)
+        children = {"m": Child(Mid, inputs={"customers": "customers"})}
+
+    plan = Top(PipelineConfig()).plan
+    assert plan.requires == ()
+    assert {b.name: b.spec.inputs for b in plan.steps} == {"m.c.upper": ("customers",)}
+    assert Top(PipelineConfig(staging_dir)).run().package.collect("m.c.named").height == 3

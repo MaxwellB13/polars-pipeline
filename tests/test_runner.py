@@ -15,6 +15,7 @@ from polars_pipeline import (
     FileReader,
     MissingInputError,
     PipelineConfig,
+    PipelineError,
     RunOptions,
     Source,
     StagingError,
@@ -289,3 +290,69 @@ def test_result_summary_and_terminal_outputs(sales, staging_dir: Path) -> None:
     assert p.plan.terminal_outputs() == ("by_region",)
     text = res.summary()
     assert "mode=lazy" in text and "[ingress] orders: ran" in text
+
+
+class ProbingReader(MemReader):
+    """Records the order of fingerprint() and scan() calls."""
+
+    def __init__(self, df: pl.DataFrame, tag: str = "probe") -> None:
+        super().__init__(df, tag)
+        self.calls: list[str] = []
+
+    def fingerprint(self) -> str:
+        self.calls.append("fingerprint")
+        return super().fingerprint()
+
+    def scan(self) -> pl.LazyFrame:
+        self.calls.append("scan")
+        return super().scan()
+
+
+def test_injected_frame_does_not_survive_into_a_normal_run(staging_dir: Path) -> None:
+    """Review finding #1: a references= frame must be replaced by a real read next time."""
+    orders_reader = MemReader(ORDERS, "orders")
+    P = make_pipeline(orders_reader, MemReader(CUSTOMERS))
+    cfg = PipelineConfig(staging_dir)
+
+    injected = P(cfg).run(references={"orders": ORDERS.head(1)})
+    assert injected.package.collect("orders").height == 1
+    assert orders_reader.scans == 0
+
+    plain = P(cfg).run()  # default refresh="stale"
+    assert orders_reader.scans == 1
+    assert plain.ingested == ["orders"]
+    assert plain.package.provenance["orders"] == "real"
+    assert plain.package.collect("orders").height == ORDERS.height
+
+
+def test_fingerprint_taken_once_and_before_read(staging_dir: Path) -> None:
+    """Review finding #4: one probe per ingest, before the data is read."""
+    orders_reader = ProbingReader(ORDERS, "orders")
+    P = make_pipeline(orders_reader, MemReader(CUSTOMERS))
+    cfg = PipelineConfig(staging_dir)
+
+    P(cfg).run()
+    assert orders_reader.calls == ["fingerprint", "scan"]
+
+    orders_reader.calls.clear()
+    P(cfg).run()  # unchanged: one probe, no read
+    assert orders_reader.calls == ["fingerprint"]
+
+    orders_reader.calls.clear()
+    P(cfg).run(refresh="none")  # present and policy never probes
+    assert orders_reader.calls == []
+
+    orders_reader.calls.clear()
+    P(cfg).run(refresh="all")  # forced: no stale check, one fingerprint for the manifest
+    assert orders_reader.calls == ["fingerprint", "scan"]
+
+
+def test_run_options_reject_bare_strings() -> None:
+    """Review finding #7."""
+    with pytest.raises(PipelineError, match=r"stages= takes a list of names.*\['transform'\]"):
+        RunOptions(stages="transform")
+    with pytest.raises(PipelineError, match="steps= takes a list"):
+        RunOptions(steps="enriched")
+    with pytest.raises(PipelineError, match="refresh= must be"):
+        RunOptions(refresh="sometimes")  # type: ignore[arg-type]
+    assert RunOptions(refresh=["orders"]).refresh == frozenset({"orders"})

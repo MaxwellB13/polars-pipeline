@@ -103,7 +103,7 @@ pipeline.run(package=DataPackage.from_frames(cfg, {"orders": df, "customers": df
 
 **Refresh.** `"stale"` (default) re-ingests a source when its file changed or its `prepare`/`conform` configuration changed; `"none"` only ingests what is missing; `"all"` or a set of names forces it.
 
-**Hermetic.** Every source needs a `spec`. Specs are generated together through a `polspec.Registry`, parents before children, so foreign keys hold by construction. Synthetic data is staged under `<staging_dir>/hermetic/<seed>/` — never over real data — and a seeded run is reused until `refresh` says otherwise. `synthetic_rows=` (int or per-source mapping) overrides each source's default. `references=` pins a real or hand-built frame for some sources while the rest are generated.
+**Hermetic.** Every *generated* source needs a `spec`. Reference data that lives in the codebase (lookup CSVs, code mappings) should not be faked: mark it `Source(..., hermetic="real")` and it is read as normal even in hermetic runs — into the hermetic staging area, so nothing real is overwritten. If it has a `spec`, generated sources with a foreign key to it draw from its real keys. Specs are generated together through a `polspec.Registry`, parents before children, so foreign keys hold by construction. Synthetic data is staged under `<staging_dir>/hermetic/<seed>/` — never over real data — and a seeded run is reused until `refresh` says otherwise. `synthetic_rows=` (int or per-source mapping) overrides each source's default. `references=` pins a real or hand-built frame for some sources while the rest are generated.
 
 ## Composition
 

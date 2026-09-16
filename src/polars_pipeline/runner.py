@@ -147,24 +147,43 @@ class Runner:
 
     def _ingress_real(self, src: Source) -> None:
         present = self.staging.has(src.name)
-        stale = present and self.staging.is_stale(src)
+        # Fingerprint at most once, and only when the decision needs it (a
+        # database watermark is a query). Taken *before* the read, so the
+        # manifest never records a newer fingerprint against older data.
+        fingerprint: str | None = None
+        stale = False
+        if present and self.options.refresh == "stale":
+            fingerprint = src.reader.fingerprint()
+            stale = self.staging.is_stale(src, fingerprint=fingerprint)
         if not self.options.wants_refresh(src.name, stale=stale, present=present):
             self._adopt(src.name, "real", reused=True)
             return
+        if fingerprint is None:
+            fingerprint = src.reader.fingerprint()
         t0 = time.perf_counter()
         self.staging.stage(
             src,
             src.read(),
             provenance="real",
-            fingerprint=src.reader.fingerprint(),
+            fingerprint=fingerprint,
             prepare_hash=src.prepare_hash(),
         )
         self._adopt(src.name, "real", seconds=time.perf_counter() - t0)
 
     def _ingress_hermetic(self, pending: list[Source], refs: Mapping[str, Any]) -> None:
+        # Sources marked hermetic="real" (reference data in the codebase) are
+        # read normally, into the hermetic staging area, *before* generation so
+        # that generated children can reference their keys.
+        for src in [s for s in pending if s.hermetic == "real"]:
+            self._ingress_real(src)
+        pending = [s for s in pending if s.hermetic != "real"]
+
         missing = [s.name for s in pending if s.spec is None]
         if missing:
-            raise HermeticError(f"hermetic run needs a spec on every source; missing for {missing}")
+            raise HermeticError(
+                f"hermetic run needs a spec on every generated source; missing for {missing} "
+                "(give it a spec, or mark it hermetic='real' if it should be read as-is)"
+            )
         # Generate only what the refresh policy asks for; reuse the rest by seed.
         # Without a seed there is nothing stable to reuse, so always generate.
         seeded = self.options.seed is not None
@@ -185,21 +204,29 @@ class Runner:
         registry = Registry()
         spec_to_sources: dict[str, list[Source]] = {}
         rows: dict[str, int] = {}
-        for s in to_generate:
-            assert s.spec is not None
-            registry.add(s.spec)
-            spec_to_sources.setdefault(s.spec.name, []).append(s)
-            rows[s.spec.name] = max(
-                rows.get(s.spec.name, 0), self.options.rows_for(s.name, s.synthetic_rows)
-            )
-        # Parents already staged (reused or injected) satisfy foreign keys.
+        try:
+            for s in to_generate:
+                assert s.spec is not None
+                registry.add(s.spec)
+                spec_to_sources.setdefault(s.spec.name, []).append(s)
+                rows[s.spec.name] = max(
+                    rows.get(s.spec.name, 0), self.options.rows_for(s.name, s.synthetic_rows)
+                )
+        except PolspecError as exc:
+            raise HermeticError(f"cannot build a spec registry for generation: {exc}") from exc
+        # Parents already staged (reused, injected, or real reference data)
+        # satisfy foreign keys. A staged frame whose spec is *being generated*
+        # (two sources sharing one spec) must not be offered: polspec would use
+        # it verbatim instead of generating.
         references: dict[str, pl.DataFrame | pl.LazyFrame] = {}
-        for s in pending:
-            if s.spec is not None and s.name not in generating and self.staging.has(s.name):
+        for s in self.plan.sources:
+            if s.spec is None or s.spec.name in rows:
+                continue
+            if s.name not in generating and self.staging.has(s.name):
                 references.setdefault(s.spec.name, self.staging.scan(s.name))
         for name, frame in refs.items():
             src = self.package.sources.get(name)
-            if src is not None and src.spec is not None:
+            if src is not None and src.spec is not None and src.spec.name not in rows:
                 references.setdefault(src.spec.name, frame)
 
         t0 = time.perf_counter()

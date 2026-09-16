@@ -197,11 +197,14 @@ class BasePipeline:
             ref = child if isinstance(child, Child) else Child(child)
             child_cls = ref.pipeline
             child_instance = child_cls(owner.config) if instance is not None else None
+            # The child's inputs are named in *this* pipeline's namespace: a
+            # frame this pipeline is itself fed keeps its outer name, anything
+            # else is prefixed like our own sources and steps.
             sub = child_cls.plan_for(
                 owner.config,
                 instance=child_instance,
                 prefix=pfx(child_prefix),
-                fed={k: v for k, v in ref.inputs.items()},
+                fed={k: fed.get(v, pfx(v)) for k, v in ref.inputs.items()},
             )
             for st in sub.stages:
                 if st not in stages:

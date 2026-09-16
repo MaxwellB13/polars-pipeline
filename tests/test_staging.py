@@ -69,13 +69,26 @@ def test_is_stale_detects_file_and_prepare_changes(data_dir: Path, staging_dir: 
     assert area.is_stale(src)
 
 
-def test_synthetic_entries_never_stale(data_dir: Path, staging_dir: Path) -> None:
+def test_non_real_entries_are_stale_for_a_real_read(data_dir: Path, staging_dir: Path) -> None:
+    """A synthetic or injected copy was never read from the source, so a real
+    ingress must replace it. (Hermetic reuse is decided by seed, not here.)"""
     area = StagingArea(staging_dir).hermetic(seed=7)
     src = Source("customers", FileReader(data_dir / "customers.parquet"), spec=CustomersSpec)
     area.stage(src, CUSTOMERS, provenance="synthetic", seed=7)
     assert area.root == staging_dir / "hermetic" / "7"
-    assert not area.is_stale(src)
+    assert area.is_stale(src)
     assert area.entry("customers").reader is None
+    area.stage(src, CUSTOMERS, provenance="injected")
+    assert area.is_stale(src)
+
+
+def test_is_stale_accepts_precomputed_fingerprint(data_dir: Path, staging_dir: Path) -> None:
+    area = StagingArea(staging_dir)
+    src = Source("customers", FileReader(data_dir / "customers.parquet"), spec=CustomersSpec)
+    fp = src.reader.fingerprint()
+    area.stage(src, src.read(), fingerprint=fp, prepare_hash=src.prepare_hash())
+    assert not area.is_stale(src, fingerprint=fp)
+    assert area.is_stale(src, fingerprint="something-else")
 
 
 def test_drop_removes_file_and_entry(data_dir: Path, staging_dir: Path) -> None:
@@ -92,7 +105,9 @@ def test_failed_write_leaves_nothing_behind(data_dir: Path, staging_dir: Path) -
     area = StagingArea(staging_dir)
     src = _orders(data_dir)
     bad = pl.LazyFrame({"x": ["1", "a"]}).select(pl.col("x").cast(pl.Int64))
-    with pytest.raises(StagingError):
+    with pytest.raises(StagingError, match="conversion from `str` to `i64` failed") as exc:
         area.stage(src, bad)
+    # The query ran once and its error is chained, not retried in memory.
+    assert isinstance(exc.value.__cause__, pl.exceptions.InvalidOperationError)
     assert not area.has("orders")
     assert list(staging_dir.glob("*.parquet")) == []

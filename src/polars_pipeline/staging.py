@@ -107,21 +107,22 @@ class StagingArea:
     def path_for(self, name: str) -> Path:
         return self.root / f"{name}.parquet"
 
-    def is_stale(self, source: Source) -> bool:
-        """True when the staged copy no longer reflects the source.
+    def is_stale(self, source: Source, *, fingerprint: str | None = None) -> bool:
+        """True when the staged copy is not what reading ``source`` would give.
 
-        A missing entry counts as stale. Synthetic/injected entries are never
-        compared to a reader: refresh them by seed (hermetic) or explicitly.
+        A missing entry is stale. So is a synthetic or injected entry: it was
+        never read from the source, so a real ingress must replace it (hermetic
+        reuse is decided by seed in the runner, not here). Pass ``fingerprint``
+        when the caller has already computed it, to avoid a second probe.
         """
         if not self.has(source.name):
             return True
         entry = self.entry(source.name)
         if entry.provenance != "real":
-            return False
-        return (
-            entry.fingerprint != source.reader.fingerprint()
-            or entry.prepare_hash != source.prepare_hash()
-        )
+            return True
+        if fingerprint is None:
+            fingerprint = source.reader.fingerprint()
+        return entry.fingerprint != fingerprint or entry.prepare_hash != source.prepare_hash()
 
     # -- read / write --------------------------------------------------------
 
@@ -216,16 +217,15 @@ def _unlink_retry(path: Path, *, linger: float = 0.0) -> None:
             pass  # next stage() of this source clears it before writing
 
 
-def _write_parquet(lf: pl.LazyFrame | pl.DataFrame, path: Path) -> int | None:
-    """Stream when Polars can, otherwise collect and write. Returns the row count."""
+def _write_parquet(lf: pl.LazyFrame | pl.DataFrame, path: Path) -> int:
+    """Write the frame and return its row count.
+
+    ``sink_parquet`` streams every plan shape Polars can build (in-memory
+    sources included), so a failure here is a real query error and is left to
+    propagate rather than retried in memory.
+    """
     if isinstance(lf, pl.DataFrame):
         lf.write_parquet(path)
         return lf.height
-    try:
-        lf.sink_parquet(path)
-    except pl.exceptions.InvalidOperationError:
-        # Plan isn't streamable (e.g. Excel-backed); fall back to in-memory.
-        df = lf.collect()
-        df.write_parquet(path)
-        return df.height
+    lf.sink_parquet(path)
     return pl.scan_parquet(path).select(pl.len()).collect().item()

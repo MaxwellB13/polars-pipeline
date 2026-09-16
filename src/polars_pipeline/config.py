@@ -9,6 +9,8 @@ from typing import Any, Literal
 
 import polars as pl
 
+from polars_pipeline.errors import PipelineError
+
 Mode = Literal["lazy", "eager"]
 RefreshPolicy = Literal["none", "stale", "all"] | frozenset[str] | set[str]
 Frames = Mapping[str, pl.DataFrame | pl.LazyFrame]
@@ -65,6 +67,24 @@ class RunOptions:
     steps: Sequence[str] | None = None
     refresh: RefreshPolicy = "stale"
     references: Frames | None = None
+
+    def __post_init__(self) -> None:
+        # A bare string is a Sequence[str] of its characters; catch the slip.
+        for field_name in ("stages", "steps"):
+            value = getattr(self, field_name)
+            if isinstance(value, str):
+                raise PipelineError(
+                    f"{field_name}= takes a list of names, not a string; "
+                    f"use {field_name}=[{value!r}]"
+                )
+        if isinstance(self.refresh, str):
+            if self.refresh not in ("none", "stale", "all"):
+                raise PipelineError(
+                    "refresh= must be 'none', 'stale', 'all' or a set of source names, "
+                    f"got {self.refresh!r}"
+                )
+        else:
+            object.__setattr__(self, "refresh", frozenset(self.refresh))
 
     def rows_for(self, name: str, default: int) -> int:
         if self.synthetic_rows is None:

@@ -28,6 +28,17 @@ def _snake(name: str) -> str:
     return name or "unnamed"
 
 
+def _dedupe(names: Iterable[str]) -> list[str]:
+    """Suffix repeats with ``_2``, ``_3``... so a frame never gets two equal names."""
+    seen: dict[str, int] = {}
+    out: list[str] = []
+    for name in names:
+        n = seen.get(name, 0) + 1
+        seen[name] = n
+        out.append(name if n == 1 else f"{name}_{n}")
+    return out
+
+
 @dataclass(frozen=True)
 class normalise_names:
     """Snake-case every column name; de-duplicate collisions with ``_2``, ``_3``...
@@ -37,16 +48,8 @@ class normalise_names:
     """
 
     def __call__(self, lf: pl.LazyFrame) -> pl.LazyFrame:
-        seen: dict[str, int] = {}
-        mapping: dict[str, str] = {}
-        for col in lf.collect_schema().names():
-            if col.startswith("__"):
-                continue
-            base = _snake(col)
-            n = seen.get(base, 0) + 1
-            seen[base] = n
-            mapping[col] = base if n == 1 else f"{base}_{n}"
-        return lf.rename(mapping)
+        cols = [c for c in lf.collect_schema().names() if not c.startswith("__")]
+        return lf.rename(dict(zip(cols, _dedupe(_snake(c) for c in cols), strict=True)))
 
 
 @dataclass(frozen=True)
@@ -108,7 +111,7 @@ class promote_header:
             idx = _first_full_row(head)
         else:
             idx = int(self.row)
-        names = [_clean_header(v, i) for i, v in enumerate(head.row(idx))]
+        names = _dedupe(_clean_header(v, i) for i, v in enumerate(head.row(idx)))
         out = lf.slice(idx + 1)
         return out.rename(dict(zip(out.collect_schema().names(), names, strict=True)))
 

@@ -67,6 +67,13 @@ class Source:
         Run ``polspec.validate`` on the conformed frame before staging.
     synthetic_rows
         Row count for hermetic generation when ``RunOptions`` does not say.
+    hermetic
+        What a hermetic run does with this source. ``"generate"`` (default)
+        replaces it with data generated from ``spec``. ``"real"`` reads it as
+        normal -- for reference data that lives in the codebase (lookup CSVs,
+        code mappings): always available, deterministic, and better real than
+        faked. With a ``spec`` it also serves as a foreign-key parent for the
+        generated sources, so synthetic rows reference real codes.
     """
 
     name: str
@@ -76,10 +83,16 @@ class Source:
     conform: Conform = "strict"
     validate_on_ingress: bool = False
     synthetic_rows: int = 1_000
+    hermetic: Literal["generate", "real"] = "generate"
 
     def __post_init__(self) -> None:
         if not self.name or "/" in self.name or "\\" in self.name:
             raise SourceError(f"invalid source name {self.name!r}")
+        if self.hermetic not in ("generate", "real"):
+            raise SourceError(
+                f"source {self.name!r}: hermetic must be 'generate' or 'real', "
+                f"got {self.hermetic!r}"
+            )
         if not isinstance(self.reader, Reader):
             raise SourceError(
                 f"source {self.name!r}: reader must implement scan(), fingerprint() "
