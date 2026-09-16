@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.staging/
+.pytest_cache/
+.ruff_cache/
+.venv/

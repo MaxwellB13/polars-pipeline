@@ -28,7 +28,7 @@ behave the same at any depth.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, ClassVar
 
@@ -115,7 +115,10 @@ class BasePipeline:
 
     name: ClassVar[str] = ""
     stages: ClassVar[Sequence[str]] = DEFAULT_STAGES
-    sources: ClassVar[Sequence[Source]] = ()
+    #: Either a tuple of ``Source``s, or a method ``def sources(self)`` returning
+    #: one -- use the method form when a reader needs ``self.config`` (a database
+    #: query's partitions, a path that varies per environment...).
+    sources: ClassVar[Sequence[Source] | Callable[[BasePipeline], Sequence[Source]]] = ()
     requires: ClassVar[Sequence[str]] = ()
     children: ClassVar[Mapping[str, type[BasePipeline] | Child]] = {}
 
@@ -128,16 +131,14 @@ class BasePipeline:
         cls.stages = tuple(cls.stages)
         if INGRESS not in cls.stages:
             raise DefinitionError(f"{cls.name}: stages must include {INGRESS!r}")
-        names = [s.name for s in cls.sources]
-        dupes = sorted({n for n in names if names.count(n) > 1})
-        if dupes:
-            raise DefinitionError(f"{cls.name}: duplicate source names {dupes}")
         for prefix in cls.children:
             if not prefix or "." in prefix:
                 raise DefinitionError(f"{cls.name}: bad child prefix {prefix!r}")
         cls._steps = tuple(collect_steps(cls))
         # Validate this class on its own; the flattened tree is validated in plan().
-        cls.plan_for(config=None)
+        # Sources built from config can only be checked once there is a config.
+        if not callable(cls.sources):
+            cls.plan_for(config=None)
 
     def __init__(self, config: PipelineConfig | None = None) -> None:
         self.config = config or PipelineConfig()
@@ -171,8 +172,13 @@ class BasePipeline:
         def pfx(n: str) -> str:
             return f"{prefix}.{n}" if prefix else n
 
+        declared = cls.sources(owner) if callable(cls.sources) else cls.sources
+        names = [s.name for s in declared]
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        if dupes:
+            raise DefinitionError(f"{cls.name}: duplicate source names {dupes}")
         sources: list[Source] = []
-        for s in cls.sources:
+        for s in declared:
             if s.name in fed:
                 continue  # parent supplies it
             sources.append(replace(s, name=pfx(s.name)))

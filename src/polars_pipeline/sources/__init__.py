@@ -26,6 +26,7 @@ from polspec.tablespec import TableSpec, as_table_spec
 
 from polars_pipeline.errors import SourceError
 from polars_pipeline.sources.file import FileReader
+from polars_pipeline.sources.function import FunctionReader
 from polars_pipeline.sources.prep import Prepare, as_prepare_list
 
 Conform = Literal["strict", "lenient", "none"]
@@ -170,4 +171,4 @@ def _callable_identity(fn: Any) -> str:
     return f"{type(fn).__module__}.{type(fn).__qualname__}:{fn!r}"
 
 
-__all__ = ["Conform", "FileReader", "Prepare", "Reader", "Source"]
+__all__ = ["Conform", "FileReader", "FunctionReader", "Prepare", "Reader", "Source"]

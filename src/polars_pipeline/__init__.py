@@ -8,11 +8,13 @@ from polars_pipeline.errors import (
     StagingError,
     StepError,
 )
-from polars_pipeline.sources import FileReader, Reader, Source, prep
+from polars_pipeline.sources import FileReader, FunctionReader, Reader, Source, prep
 
 __all__ = [
     "DefinitionError",
     "FileReader",
+    "FunctionReader",
+    "FunctionReader",
     "HermeticError",
     "MissingInputError",
     "PipelineConfig",
